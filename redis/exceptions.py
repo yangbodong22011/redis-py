@@ -243,6 +243,24 @@ class MovedError(AskError):
     pass
 
 
+class RedirectError(ResponseError):
+    """
+    Error indicated REDIRECT error received from a CAPA redirect.
+
+    When a server supports CLIENT CAPA redirect, replicas can return
+    -REDIRECT <primary-host>:<primary-port> to ask a capable client to reconnect
+    to the current primary and retry the command.
+    """
+
+    def __init__(self, resp, status_code: str = None):
+        super().__init__(resp, status_code=status_code)
+        self.args = (resp,)
+        self.message = resp
+        target = resp.split(maxsplit=1)[1]
+        host, port = target.rsplit(":", 1)
+        self.node_addr = self.host, self.port = host, int(port)
+
+
 class MasterDownError(ClusterDownError):
     """
     Error indicated MASTERDOWN error received from cluster.

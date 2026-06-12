@@ -188,6 +188,7 @@ class AbstractConnection:
         protocol: int | None = None,
         legacy_responses: bool = True,
         event_dispatcher: EventDispatcher | None = None,
+        capa_redirect: bool = False,
     ):
         """
         Initialize a new async Connection.
@@ -216,6 +217,7 @@ class AbstractConnection:
             self._event_dispatcher = event_dispatcher
         self.db = db
         self.client_name = client_name
+        self.capa_redirect = capa_redirect
 
         # Handle driver_info: if provided, use it; otherwise create from lib_name/lib_version.
         self.driver_info = resolve_driver_info(driver_info, lib_name, lib_version)
@@ -525,6 +527,15 @@ class AbstractConnection:
             #     "proto"
             # ) != self.protocol:
             #     raise ConnectionError("Invalid RESP version")
+
+        if self.capa_redirect:
+            await self.send_command(
+                "CLIENT",
+                "CAPA",
+                "redirect",
+                check_health=check_health,
+            )
+            await self.read_response()
 
         # if a client_name is given, set it
         if self.client_name:
@@ -1210,6 +1221,7 @@ URL_QUERY_ARGUMENT_PARSERS: Mapping[str, Callable[..., object]] = MappingProxyTy
         "timeout": float,
         "protocol": int,
         "legacy_responses": to_bool,
+        "capa_redirect": to_bool,
     }
 )
 
@@ -1446,6 +1458,22 @@ class ConnectionPool(ConnectionPoolInterface):
             in which case the server default will be used.
         """
         return self.connection_kwargs.get("protocol", None)
+
+    async def update_primary_address(self, host: str, port: int) -> None:
+        if "path" in self.connection_kwargs:
+            raise RedisError("CAPA redirect is not supported with Unix sockets")
+
+        async with self._lock:
+            self.connection_kwargs.update({"host": host, "port": int(port)})
+            for connection in chain(
+                self._available_connections, self._in_use_connections
+            ):
+                if hasattr(connection, "host"):
+                    connection.host = host
+                if hasattr(connection, "port"):
+                    connection.port = int(port)
+                connection.mark_for_reconnect()
+            await self.disconnect(inuse_connections=False)
 
     def reset(self):
         # Record metrics for connections being removed before clearing

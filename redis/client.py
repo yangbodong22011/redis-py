@@ -59,6 +59,7 @@ from redis.exceptions import (
     ExecAbortError,
     PubSubError,
     RedisError,
+    RedirectError,
     ResponseError,
     WatchError,
 )
@@ -298,6 +299,7 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
         maint_notifications_config: MaintNotificationsConfig | None = None,
         oss_cluster_maint_notifications_handler: OSSMaintNotificationsHandler
         | None = None,
+        capa_redirect: bool = False,
     ) -> None:
         """
         Initialize a new Redis client.
@@ -395,6 +397,7 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
                 "credential_provider": credential_provider,
                 "protocol": protocol,
                 "legacy_responses": legacy_responses,
+                "capa_redirect": capa_redirect,
             }
             # based on input, setup appropriate connection args
             if unix_socket_path is not None:
@@ -493,6 +496,9 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
             )
 
         self.connection_pool = connection_pool
+        self._capa_redirect = bool(
+            self.connection_pool.connection_kwargs.get("capa_redirect", False)
+        )
 
         if (cache_config or cache) and not check_protocol_version(
             self.connection_pool.get_protocol(), 3
@@ -802,6 +808,7 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
         pool = self.connection_pool
         command_name = args[0]
         conn = self.connection or pool.get_connection()
+        redirected = False
 
         # Start timing for observability
         start_time = time.monotonic()
@@ -817,13 +824,29 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
         if self._single_connection_client:
             self.single_connection_lock.acquire()
         try:
-            result = conn.retry.call_with_retry(
-                lambda: self._send_command_parse_response(
-                    conn, command_name, *args, **options
-                ),
-                failure_callback,
-                with_failure_count=True,
-            )
+            while True:
+                try:
+                    result = conn.retry.call_with_retry(
+                        lambda: self._send_command_parse_response(
+                            conn, command_name, *args, **options
+                        ),
+                        failure_callback,
+                        with_failure_count=True,
+                    )
+                    break
+                except RedirectError as e:
+                    if (
+                        not self._capa_redirect
+                        or redirected
+                        or self.connection is not None
+                    ):
+                        raise
+                    redirected = True
+                    conn.disconnect()
+                    pool.release(conn)
+                    conn = None
+                    pool.update_primary_address(e.host, e.port)
+                    conn = pool.get_connection()
 
             record_operation_duration(
                 command_name=command_name,
@@ -851,7 +874,7 @@ class Redis(RedisModuleCommands, CoreCommands, SentinelCommands):
                 conn.connect()
             if self._single_connection_client:
                 self.single_connection_lock.release()
-            if not self.connection:
+            if conn and not self.connection:
                 pool.release(conn)
 
     def parse_response(self, connection, command_name, **options):

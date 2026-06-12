@@ -32,6 +32,7 @@ from ..exceptions import (
     NoScriptError,
     OutOfMemoryError,
     ReadOnlyError,
+    RedirectError,
     ResponseError,
     TryAgainError,
 )
@@ -95,6 +96,7 @@ class BaseParser(ABC):
         "ASK": AskError,
         "TRYAGAIN": TryAgainError,
         "MOVED": MovedError,
+        "REDIRECT": RedirectError,
         "CLUSTERDOWN": ClusterDownError,
         "CROSSSLOT": ClusterCrossSlotError,
         "MASTERDOWN": MasterDownError,
